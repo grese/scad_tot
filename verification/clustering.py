@@ -35,7 +35,7 @@ class LabelGuidedKMeans:
         '''
         self._regions = []
 
-    def fit(self, X, Y, init_centroid='rand'):
+    def fit(self, X, Y, init_centroid='rand', weights=None):
         '''
         fits the LGKMeans model to the input data to generate regions
 
@@ -54,6 +54,8 @@ class LabelGuidedKMeans:
         assert X.shape[0] == Y.shape[0], 'X & Y must have same number of items'
         assert X.shape[0] == np.unique(X, axis=0).shape[0], 'X must have no duplicates'
         assert init_centroid in init_centroid_choices, f'init_centroid mode must be one of {init_centroid_choices}'
+        weights = weights if weights is not None else np.ones((X.shape[0],))
+        assert weights.shape[0] == X.shape[0], 'weights must have same number of items as X'
 
         start_time = ms_since_1970()
         self._X, self._Y = X.copy(), np.array([LabelGuidedKMeansUtils.from_categorical(y) for y in Y])
@@ -61,29 +63,29 @@ class LabelGuidedKMeans:
         self._categories = np.unique(self._Y, axis=0)
         logger.info(f'running label-guided k-means on {self._X.shape[0]} inputs of {self._categories.shape[0]} labels')
 
-        remaining, regions = [(self._X, self._Y)], []
+        remaining, regions = [(self._X, self._Y, weights)], []
         while len(remaining) > 0:
             # get data to work on
-            X, Y = remaining.pop(0)
+            X, Y, weights = remaining.pop(0)
             n = np.unique(Y, axis=0).shape[0]
             # setup KMeans params and get initial centroids
             model_params = dict(n_clusters=n)
             if init_centroid != 'kmeans++':
                 model_params['init'] = LabelGuidedKMeansUtils.get_initial_centroids(X, Y, rand=(init_centroid=='rand'))
             # create kmeans clusters, get the centroids, and count labels in each cluster
-            model = KMeans(**model_params).fit(X, Y)
+            model = KMeans(**model_params).fit(X, Y, sample_weight=weights)
             centroids = model.cluster_centers_
             Yhat = model.predict(X)
             # create kmeans clusters, get the centroids, and count labels in each cluster
             for c in np.unique(Yhat, axis=0):
                 xis = np.where(Yhat == c)[0]
-                Xc, Yc = X[xis], Y[xis]
+                Xc, Yc, wc = X[xis], Y[xis], weights[xis]
                 if len(np.unique(Yc, axis=0)) == 1:
                     # cluster only contained a single label, so save it as a 'region'
                     regions.append(LabelGuidedKMeansRegion(centroids[c], Xc, Yc, self._categories.shape[0]))
                 else:
                     # cluster contained two or more labels, so repeat KMeans on the cluster.
-                    remaining.append((Xc, Yc))
+                    remaining.append((Xc, Yc,  wc))
 
         # sanity check the regions
         assert self._X.shape[0] == sum([r.X.shape[0] for r in regions]), 'sum total of region sizes should equal num rows in X'
@@ -263,6 +265,38 @@ class LabelGuidedKMeansUtils:
             ic = X[np.random.choice(yuniq_idxs) if rand else 0]
             initial_centroids.append(ic)
         return np.array(initial_centroids)
+
+    @staticmethod
+    def genearte_sample_weights(X, Y):
+        '''
+        Generates sample_weights to pass to LabelGuidedKMeans "fit" function
+
+        Parameters
+            X   : np.array of inputs
+            Y   : np.array of labels
+        Return
+            1D np.array with same number of rows as X and Y
+        '''
+        assert X.shape[0] == Y.shape[0], 'X and Y should have same number of items'
+        
+        weights = []
+        Y = [LabelGuidedKMeansUtils.from_categorical(y) for y in Y]
+        for i, y in enumerate(Y):
+            x = X[i]
+            w = 0
+
+            # for 'slow' and 'med_slow' inputs...
+            if y == 0 or y == 1:
+                w = x[0]
+            # for 'med' inputs
+            elif y == 2:
+                w = x[1]
+            # for 'med_fast' and 'fast' inputs
+            elif y == 3 or y == 4:
+                w = x[19]
+
+            weights.append(w)
+        return np.array(weights)
 
     @staticmethod
     def find_original_point(region, X_orig, nearest=True):
